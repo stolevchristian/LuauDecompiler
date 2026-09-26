@@ -1,0 +1,5 @@
+# normalize line endings; shell scripts must stay LF so bash on Windows can run them
+* text=auto
+*.sh text eol=lf
+*.luau text
+*.luauc binary

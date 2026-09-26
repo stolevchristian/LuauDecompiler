@@ -1,0 +1,18 @@
+Function 0 (a):
+    2:  return 32
+LOADN R0 32
+RETURN R0 1
+
+Function 1 (??):
+    1: function a()
+DUPCLOSURE R0 K0 ['a']
+SETGLOBAL R0 K1 ['a']
+    5: print("Hello World", a())
+GETIMPORT R0 3 [print]
+LOADK R1 K4 ['Hello World']
+GETGLOBAL R2 K1 ['a']
+CALL R2 0 -1
+CALL R0 -1 0
+    6: 
+RETURN R0 0
+
