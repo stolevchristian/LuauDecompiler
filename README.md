@@ -10,28 +10,64 @@ decompiler follows the upstream definitions instead of a hand-written copy.
 ## Examples
 #### INPUT
 ```lua
-local x = 10
-local y, z = 20, "s"
-local t = {1, 2, x = 3, [y] = z}
-local function f(a, b)
-    return a + b * 2 - x
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local SOUND_EVENT_FOLDER_NAME = "DefaultSoundEvents"
+local DEFAULT_SERVER_SOUND_EVENT_NAME = "DefaultServerSoundEvent"
+
+local folder = ReplicatedStorage:FindFirstChild(SOUND_EVENT_FOLDER_NAME)
+local useDispatcher = UserSettings():IsUserFeatureEnabled("UserUseSoundDispatcher")
+local sound = Instance.new("Sound")
+local remote = Instance.new("RemoteEvent", sound)
+local config = require(script.Parent.Config)
+local camera = workspace.CurrentCamera
+local offset = Vector3.new(0, 5, 0)
+local color = Color3.fromRGB(255, 0, 0)
+
+local current = ReplicatedStorage:WaitForChild("First")
+if useDispatcher then
+    current = ReplicatedStorage:WaitForChild("Second")
 end
-t.g = function(self, n) return self.x + n end
-print(f(x, y), t:g(5), #t, t[1], -x, not y, x .. z)
-local v = x > 5 and "big" or "small"
-print(v, x == 10, y ~= 3)
+
+local last = Instance.new("Part")
+local function replace(part)
+    last = part
+end
+
+sound.Name = DEFAULT_SERVER_SOUND_EVENT_NAME
+sound.Parent = folder
+remote.Name = "Fire"
+replace(sound)
+print(Players.LocalPlayer, RunService:IsServer(), config.volume, camera.CFrame, offset + Vector3.new(1, 1, 1), color, current, last)
 ```
 #### OUTPUT
 ```lua
-local v1 = {1, 2, x = 3, [20] = "s"}
-local function f(v2, v3)
-    return v2 + v3 * 2 - 10
+local r_ReplicatedStorage = game:GetService("ReplicatedStorage")
+local r_Players = game:GetService("Players")
+local r_RunService = game:GetService("RunService")
+local r_DefaultSoundEvents = r_ReplicatedStorage:FindFirstChild("DefaultSoundEvents")
+local v6 = UserSettings():IsUserFeatureEnabled("UserUseSoundDispatcher")
+local r_Sound = Instance.new("Sound")
+local r_RemoteEvent = Instance.new("RemoteEvent", r_Sound)
+local r_ConfigModule = require(script.Parent.Config)
+local r_CurrentCamera = workspace.CurrentCamera
+local r_Vector3 = Vector3.new(0, 5, 0)
+local r_Color3 = Color3.fromRGB(255, 0, 0)
+local v12 = r_ReplicatedStorage:WaitForChild("First")
+if v6 then
+    v12 = r_ReplicatedStorage:WaitForChild("Second")
 end
-function v1:g(v4)
-    return self.x + v4
+local v13 = Instance.new("Part")
+r_Sound.Name = "DefaultServerSoundEvent"
+r_Sound.Parent = r_DefaultSoundEvents
+r_RemoteEvent.Name = "Fire"
+local function v14(p1)
+    v13 = p1
 end
-print(f(10, 20), v1:g(5), #v1, v1[1], -10, false, 10 .. "s")
-print("big", true, true)
+v14(r_Sound)
+print(r_Players.LocalPlayer, r_RunService:IsServer(), r_ConfigModule.volume, r_CurrentCamera.CFrame, r_Vector3 + Vector3.new(1, 1, 1), r_Color3, v12, v13)
 ```
 
 ## Layout
