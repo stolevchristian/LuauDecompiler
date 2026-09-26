@@ -7,6 +7,33 @@ Opcode numbers, instruction encodings and constant tags come straight from
 `third_party/luau/Common/include/Luau/Bytecode.h` and `BytecodeUtils.h`, so the
 decompiler follows the upstream definitions instead of a hand-written copy.
 
+## Examples
+#### INPUT
+```lua
+local x = 10
+local y, z = 20, "s"
+local t = {1, 2, x = 3, [y] = z}
+local function f(a, b)
+    return a + b * 2 - x
+end
+t.g = function(self, n) return self.x + n end
+print(f(x, y), t:g(5), #t, t[1], -x, not y, x .. z)
+local v = x > 5 and "big" or "small"
+print(v, x == 10, y ~= 3)
+```
+#### OUTPUT
+```lua
+local v1 = {1, 2, x = 3, [20] = "s"}
+local function f(v2, v3)
+    return v2 + v3 * 2 - 10
+end
+function v1:g(v4)
+    return self.x + v4
+end
+print(f(10, 20), v1:g(5), #v1, v1[1], -10, false, 10 .. "s")
+print("big", true, true)
+```
+
 ## Layout
 
 ```
