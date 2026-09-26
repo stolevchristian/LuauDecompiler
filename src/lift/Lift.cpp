@@ -1313,7 +1313,7 @@ struct Lifter
             if (needsFlush(*pending[r]))
                 materialize(r);
             else
-                pending[r].reset();
+                discard(r);
         }
     }
 
@@ -1350,7 +1350,7 @@ struct Lifter
             if (needsFlush(P) || an.liveAt(beginIdx, r))
                 materialize(r);
             else
-                pending[r].reset();
+                discard(r);
         }
     }
 
@@ -1461,6 +1461,16 @@ struct Lifter
         if (!pending[reg])
             return;
         if (needsFlush(*pending[reg]))
+            materialize(reg);
+        else
+            discard(reg);
+    }
+
+    // A dead pure value disappears, except a closure: its body is worth showing even if nothing
+    // ever calls it (a script that only defines functions would otherwise decompile to nothing).
+    void discard(int reg)
+    {
+        if (pending[reg] && pending[reg]->expr->kind == ExprKind::Function && pending[reg]->method.empty())
             materialize(reg);
         else
             pending[reg].reset();
@@ -3409,10 +3419,23 @@ struct Lifter
         if (F > end && bareReturn(F) && end - 1 >= S && bareReturn(end - 1))
             F = end - 1; // the branch's own RETURN stays after this if, as in the source
 
+        // the false edge goes straight to the join of an enclosing if (the compiler shortcuts through
+        // the enclosing branch's trailing jump): the then body simply runs to the end of this range
+        if (F > end && isJoinTarget(F))
+            F = end;
+
         if (F < S || F > end)
         {
+            // cannot express the false edge: keep the condition on the rest of the range so the true
+            // path at least stays correct, and say so
             unsupported(idx, "conditional jump leaves the current block");
-            return S;
+            beforeConstruct(S, end);
+            declareLiveAfter(S, end, end);
+            beforeStatement();
+            std::vector<StmtP> body;
+            liftBlock(S, end, ctx, body);
+            pushStmt(makeIf(chain.cond, body));
+            return end;
         }
 
         int thenEnd = F;
