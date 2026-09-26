@@ -104,10 +104,23 @@ inferred where the bytecode allows it and generated as `v1`, `v2`, ... elsewhere
 
 - local functions keep the name the compiler recorded for them (`local function
   _cycleBuffer(...)`), which survives at the default `-g1` level;
-- numeric loop variables become `i`, `j`, `k` by nesting depth, generic loops use
-  `k, v` (or `i, v` over `ipairs`);
+- parameters become `p1`, `p2`, ...; numeric loop variables become `i`, `j`, `k` by
+  nesting depth, generic loops use `k, v` (or `i, v` over `ipairs`); a parameter or loop
+  variable that is never read is `_`;
+- getters called with a literal key name their result: `r_best_times =
+  storage.getItem("best_times")` (functions starting with get, find, wait, load, fetch,
+  read or lookup);
 - a function stored in a field whose name is called with `obj:name(...)` anywhere in
   the module is printed as `function t:name(...)` with a `self` parameter;
+- a variable whose values say what it holds is named after them:
+  `r_ReplicatedStorage = game:GetService("ReplicatedStorage")`,
+  `r_Sound = Instance.new("Sound")`, `r_ConfigModule = require(script.Parent.Config)`,
+  `r_CurrentCamera = workspace.CurrentCamera`, `r_Vector3 = Vector3.new(...)`,
+  `r_AvatarJointUpgradeFeature = game:GetEngineFeature("...")`,
+  `r_DiedConnection = humanoid.Died:Connect(...)`, and `FindFirstChild`/`WaitForChild`
+  lookups by literal name. A variable keeps the name only if every value ever stored in
+  it (including writes from nested closures) carries the same hint; a `nil` placeholder
+  followed by such a value counts. Anything else keeps its neutral `vN` name;
 - generated names never shadow a global the module reads or writes.
 
 Single-use temporaries are folded into the expression that consumes them, table

@@ -7,7 +7,9 @@
 #include "Luau/Bytecode.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <set>
@@ -712,7 +714,178 @@ struct NameContext
     int counter = 0;
     std::set<std::string> reserved; // global names read or written anywhere in the module
     std::set<std::string> methods;  // names invoked with `obj:name(...)` anywhere in the module
+    std::set<std::string> taken;    // every variable name handed out in the module
+
+    // A generated variable name and what its values look like. The variable is renamed at the end
+    // when every value stored in it carries the same descriptive hint (`r_LocalPlayer` for a
+    // variable that only ever holds `Players.LocalPlayer`).
+    struct Candidate
+    {
+        std::string hint;  // descriptive name so far, empty while the variable only held nil
+        bool bad = false;  // a value without a hint, or with a different one, was stored
+    };
+    std::map<std::string, Candidate> candidates;
 };
+
+// What a value expression obviously is, for naming the variable that holds it.
+// Only forms whose meaning is certain: `game:GetService("X")`, `Instance.new("X")`,
+// `x:FindFirstChild("X")`, `Vector3.new(...)`, `require(path.X)` and `parent.X`.
+std::string valueNameHint(const ExprP& e)
+{
+    auto stringArg = [](const ExprP& call) -> std::string {
+        if (call->args.empty() || call->args[0]->kind != ExprKind::String)
+            return "";
+        return call->args[0]->str;
+    };
+    auto lastKey = [](ExprP x) -> std::string {
+        if (x && x->kind == ExprKind::Index && x->b->kind == ExprKind::String)
+            return x->b->str;
+        return "";
+    };
+
+    std::string hint;
+    switch (e->kind)
+    {
+    case ExprKind::MethodCall:
+    {
+        static const char* lookups[] = {"GetService", "FindFirstChild", "WaitForChild", "FindFirstChildOfClass", "FindFirstChildWhichIsA",
+            "FindFirstAncestor", "FindFirstAncestorOfClass", "FindFirstAncestorWhichIsA", "GetAttribute", "GetEngineFeature", "GetFastFlag",
+            "GetFastInt", "GetFastString", "DefineFastFlag", "DefineFastInt", "DefineFastString"};
+        for (const char* name : lookups)
+            if (e->str == name)
+                hint = stringArg(e);
+        // signal.Died:Connect(fn) -> DiedConnection
+        if ((e->str == "Connect" || e->str == "ConnectParallel" || e->str == "Once") && !lastKey(e->a).empty())
+            hint = lastKey(e->a) + "Connection";
+        break;
+    }
+    case ExprKind::Call:
+    {
+        const ExprP& fn = e->a;
+        if (fn->kind == ExprKind::Index && fn->a->kind == ExprKind::Global && fn->b->kind == ExprKind::String)
+        {
+            if (fn->a->str == "Instance" && fn->b->str == "new")
+                hint = stringArg(e); // Instance.new("Sound")
+            else if (fn->b->str == "new" || fn->b->str == "fromRGB" || fn->b->str == "fromScale" || fn->b->str == "fromOffset")
+                hint = fn->a->str; // Vector3.new(...), Color3.fromRGB(...)
+        }
+        else if (fn->kind == ExprKind::Global && fn->str == "require" && !e->args.empty())
+        {
+            // require(script.Parent.Foo) / require(folder:WaitForChild("Foo")) -> FooModule
+            const ExprP& arg = e->args[0];
+            std::string base = lastKey(arg);
+            if (base.empty() && arg->kind == ExprKind::MethodCall)
+                base = valueNameHint(arg);
+            if (!base.empty())
+                hint = base + "Module";
+        }
+        break;
+    }
+    case ExprKind::Index:
+        hint = lastKey(e); // workspace.Part, script.Parent
+        break;
+    default:
+        break;
+    }
+
+    // generic getters: storage.getItem("best_times"), x:FindValue("name"), loadAsset("id")
+    if (hint.empty() && (e->kind == ExprKind::Call || e->kind == ExprKind::MethodCall))
+    {
+        std::string fname;
+        if (e->kind == ExprKind::MethodCall)
+            fname = e->str;
+        else if (e->a->kind == ExprKind::Global)
+            fname = e->a->str;
+        else if (e->a->kind == ExprKind::Index && e->a->b->kind == ExprKind::String)
+            fname = e->a->b->str;
+
+        static const char* prefixes[] = {"get", "Get", "find", "Find", "wait", "Wait", "load", "Load", "fetch", "Fetch", "read", "Read", "lookup", "Lookup"};
+        bool getter = false;
+        for (const char* p : prefixes)
+            if (fname.rfind(p, 0) == 0 && fname.size() > strlen(p))
+                getter = true;
+
+        if (getter && !e->args.empty() && e->args[0]->kind == ExprKind::String)
+        {
+            // turn the literal into an identifier: "best_times" -> best_times, "my-key" -> my_key
+            std::string s;
+            for (unsigned char ch : e->args[0]->str)
+                s += (isalnum(ch) || ch == '_') ? char(ch) : '_';
+            while (!s.empty() && isdigit((unsigned char)s[0]))
+                s.erase(0, 1);
+            hint = s;
+        }
+    }
+
+    if (hint.size() > 48 || !isIdentifier(hint))
+        return "";
+    return hint;
+}
+
+// Rename variables throughout a lifted function, including nested closures.
+void renameAll(const ExprP& e, const std::map<std::string, std::string>& map);
+void renameAll(std::vector<StmtP>& body, const std::map<std::string, std::string>& map);
+
+void renameAll(FunctionBody& fn, const std::map<std::string, std::string>& map)
+{
+    for (std::string& p : fn.params)
+    {
+        auto it = map.find(p);
+        if (it != map.end())
+            p = it->second;
+    }
+    renameAll(fn.body, map);
+}
+
+void renameAll(const ExprP& e, const std::map<std::string, std::string>& map)
+{
+    if (!e)
+        return;
+    if (e->kind == ExprKind::Local || e->kind == ExprKind::Upvalue)
+    {
+        auto it = map.find(e->str);
+        if (it != map.end())
+            e->str = it->second;
+    }
+    renameAll(e->a, map);
+    renameAll(e->b, map);
+    for (const ExprP& arg : e->args)
+        renameAll(arg, map);
+    for (const TableItem& item : e->items)
+    {
+        renameAll(item.key, map);
+        renameAll(item.value, map);
+    }
+    if (e->func)
+        renameAll(*e->func, map);
+}
+
+void renameAll(std::vector<StmtP>& body, const std::map<std::string, std::string>& map)
+{
+    for (const StmtP& s : body)
+    {
+        for (std::string& n : s->names)
+        {
+            auto it = map.find(n);
+            if (it != map.end())
+                n = it->second;
+        }
+        for (const ExprP& t : s->targets)
+            renameAll(t, map);
+        for (const ExprP& v : s->values)
+            renameAll(v, map);
+        renameAll(s->expr, map);
+        if (s->func)
+            renameAll(*s->func, map);
+        for (IfClause& c : s->clauses)
+        {
+            renameAll(c.cond, map);
+            renameAll(c.body, map);
+        }
+        renameAll(s->elseBody, map);
+        renameAll(s->body, map);
+    }
+}
 
 struct Lifter
 {
@@ -809,8 +982,8 @@ struct Lifter
             if (!used.count(hint))
                 return hint;
             for (int n = 2; n < 10; ++n)
-                if (!used.count(hint + std::to_string(n)))
-                    return hint + std::to_string(n);
+                if (!used.count(hint + "_" + std::to_string(n)))
+                    return hint + "_" + std::to_string(n);
         }
         std::string name;
         do
@@ -829,7 +1002,12 @@ struct Lifter
             hint = m.protos[P.expr->integer].debugname;
         else if (P.expr->kind == ExprKind::Nil)
             hint = closureNameAssignedLater(reg, P.defIdx);
-        return newName(hint);
+        std::string name = newName(hint);
+
+        // remember what the value is; the variable is renamed at the end if every value it holds agrees
+        if (name != hint)
+            registerCandidate(name, P.expr);
+        return name;
     }
 
     // `local f; ... function f() end`: a nil placeholder that later receives a named closure.
@@ -896,6 +1074,38 @@ struct Lifter
     {
         vars[reg] = VarInfo{name, currentScope(), sticky};
         used.insert(name);
+        names->taken.insert(name);
+    }
+
+    // The variable is written after its declaration. It keeps its descriptive name only if the new
+    // value carries the same hint (or the variable only held nil so far).
+    void noteAssigned(const std::string& name, const ExprP& value = nullptr)
+    {
+        auto it = names->candidates.find(name);
+        if (it == names->candidates.end())
+            return;
+        NameContext::Candidate& c = it->second;
+        std::string hint = value ? valueNameHint(value) : "";
+        // nil and an empty table are neutral fallbacks (`best_times = getItem(...) or {}`)
+        if (value && (value->kind == ExprKind::Nil || (value->kind == ExprKind::Table && value->items.empty())))
+            return;
+        if (hint.empty())
+            c.bad = true;
+        else if (c.hint.empty())
+            c.hint = hint;
+        else if (c.hint != hint)
+            c.bad = true;
+    }
+
+    void registerCandidate(const std::string& name, const ExprP& value)
+    {
+        NameContext::Candidate c;
+        if (value && value->kind != ExprKind::Nil)
+        {
+            c.hint = valueNameHint(value);
+            c.bad = c.hint.empty();
+        }
+        names->candidates[name] = c;
     }
 
     bool hasStickyVar(int reg) const
@@ -1058,7 +1268,10 @@ struct Lifter
             if (isDecl)
                 s->names.push_back(name);
             else
+            {
                 s->expr = mkName(ExprKind::Local, name, reg);
+                noteAssigned(name, P.expr);
+            }
             s->func = P.expr->func;
             pushStmt(s);
             return mkName(ExprKind::Local, name, reg);
@@ -1068,7 +1281,10 @@ struct Lifter
         if (isDecl)
             s->names.push_back(name);
         else
+        {
             s->targets.push_back(mkName(ExprKind::Local, name, reg));
+            noteAssigned(name, P.expr);
+        }
         P.expr->multret = false;
         s->values.push_back(P.expr);
         pushStmt(s);
@@ -1182,6 +1398,8 @@ struct Lifter
         setVar(reg, name, sticky);
         if (dl && name == dl->name)
             vars[reg].debugEndPc = dl->endpc;
+        else
+            registerCandidate(name, nullptr); // declared without a value: the branches decide the name
         StmtP s = mkStmt(StmtKind::Local);
         s->names.push_back(name);
         pushStmt(s);
@@ -1416,7 +1634,10 @@ struct Lifter
         {
             int reg = firstReg + i;
             if (allSame)
+            {
                 s->targets.push_back(mkName(ExprKind::Local, names[i], reg));
+                noteAssigned(names[i]);
+            }
             else
             {
                 s->names.push_back(names[i]);
@@ -1798,6 +2019,7 @@ struct Lifter
             StmtP s = mkStmt(StmtKind::Assign);
             s->targets.push_back(mkName(ExprKind::Upvalue, upvalName(b)));
             s->values.push_back(value);
+            noteAssigned(upvalName(b), value);
             emit(s);
             break;
         }
@@ -2473,6 +2695,8 @@ struct Lifter
         StmtP s = mkStmt(StmtKind::Assign);
         s->targets = {mkName(ExprKind::Local, vars[first].name, first), mkName(ExprKind::Local, vars[second].name, second)};
         s->values = {mkName(ExprKind::Local, vars[second].name, second), mkName(ExprKind::Local, vars[first].name, first)};
+        noteAssigned(vars[first].name);
+        noteAssigned(vars[second].name);
         emit(s);
         return 3;
     }
@@ -2621,7 +2845,8 @@ struct Lifter
         out = &s->body;
         pushScope();
         const DebugLocal* dl = debugLocalAt(varReg, int(an.insns[bodyBegin < loopIdx ? bodyBegin : loopIdx].pc));
-        std::string varName = dl ? dl->name : newName(forDepth < 3 ? kIndexNames[forDepth] : "");
+        bool varUnused = bodyBegin < loopIdx && an.countUsesFrom(bodyBegin, varReg, false).count == 0;
+        std::string varName = dl ? dl->name : (varUnused ? "_" : newName(forDepth < 3 ? kIndexNames[forDepth] : ""));
         setVar(varReg, varName, true);
         s->names.push_back(varName);
         for (int r = base; r < base + 3; ++r)
@@ -2714,7 +2939,8 @@ struct Lifter
             int reg = base + 3 + v;
             const DebugLocal* dl = debugLocalAt(reg, bodyPc);
             std::string hint = nvars == 1 ? "v" : (v < 2 ? hints2[v] : "");
-            std::string name = dl ? dl->name : newName(hint);
+            bool unused = idx + 1 < loopIdx && an.countUsesFrom(idx + 1, reg, false).count == 0;
+            std::string name = dl ? dl->name : (unused ? "_" : newName(hint));
             setVar(reg, name, true);
             s->names.push_back(name);
         }
@@ -3021,6 +3247,11 @@ struct Lifter
                         return target;
                     }
                     pending[reg] = lhsPending;
+
+                    // not a value pattern after all: `local x = e1; if not x then ... x = e2 end`. The value
+                    // is read by the condition and again later, so it needs to be a variable now
+                    if (an.countUses(lhsPending.defIdx, reg).count >= 2)
+                        declareBefore(reg, false);
                 }
             }
         }
@@ -3170,6 +3401,14 @@ struct Lifter
             return S;
         }
 
+        // a branch that ends the function with its own RETURN may jump to the function's final RETURN
+        // instead of to its own end; both do the same thing
+        auto bareReturn = [&](int i) {
+            return i >= 0 && i < int(an.insns.size()) && an.insns[i].op == LOP_RETURN && an.insns[i].b == 1;
+        };
+        if (F > end && bareReturn(F) && end - 1 >= S && bareReturn(end - 1))
+            F = end - 1; // the branch's own RETURN stays after this if, as in the source
+
         if (F < S || F > end)
         {
             unsupported(idx, "conditional jump leaves the current block");
@@ -3295,7 +3534,15 @@ struct Lifter
         for (int i = 0; i < p.numparams; ++i)
         {
             const DebugLocal* dl = debugLocalAt(i, 0);
-            std::string name = dl ? dl->name : newName(i == 0 && selfParam ? "self" : "");
+            std::string name;
+            if (dl)
+                name = dl->name;
+            else if (i == 0 && selfParam)
+                name = newName("self");
+            else if (an.countUsesFrom(0, i, false).count == 0)
+                name = "_"; // never read (duplicates of `_` are legal)
+            else
+                name = newName("p" + std::to_string(i + 1));
             setVar(i, name, true);
             fn->params.push_back(name);
         }
@@ -3382,7 +3629,29 @@ FunctionP liftModule(const Module& m, const LiftOptions& options)
 
     std::vector<std::string> upvals;
     std::set<std::string> inherited;
-    return Lifter::liftProto(m, m.protos[m.mainProto], options, upvals, &names, inherited);
+    FunctionP main = Lifter::liftProto(m, m.protos[m.mainProto], options, upvals, &names, inherited);
+
+    // descriptive names for variables that hold an identifiable value and are never assigned again
+    std::map<std::string, std::string> renames;
+    std::set<std::string> taken = names.taken;
+    taken.insert(names.reserved.begin(), names.reserved.end());
+    for (const auto& [generated, candidate] : names.candidates)
+    {
+        if (candidate.bad || candidate.hint.empty())
+            continue;
+        std::string wanted = "r_" + candidate.hint;
+        std::string name = wanted;
+        for (int n = 2; taken.count(name) && n < 100; ++n)
+            name = wanted + "_" + std::to_string(n);
+        if (taken.count(name))
+            continue;
+        taken.insert(name);
+        renames[generated] = name;
+    }
+    if (!renames.empty())
+        renameAll(*main, renames);
+
+    return main;
 }
 
 std::string decompile(const Module& m, const LiftOptions& options)
