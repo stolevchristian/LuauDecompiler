@@ -438,6 +438,26 @@ std::string emitStmt(const StmtP& s, int indent)
     }
     case StmtKind::Assign:
     {
+        // `x = x + e` prints as `x += e`; the bytecode for both spellings is identical
+        if (s->targets.size() == 1 && s->values.size() == 1 && s->values[0]->kind == ExprKind::BinOp)
+        {
+            const ExprP& target = s->targets[0];
+            const ExprP& value = s->values[0];
+            static const char* compound[] = {"+", "-", "*", "/", "//", "%", "^", ".."};
+            bool compoundOp = false;
+            for (const char* op : compound)
+                if (value->str == op)
+                    compoundOp = true;
+            bool sameVar = (target->kind == ExprKind::Local || target->kind == ExprKind::Upvalue || target->kind == ExprKind::Global) &&
+                           value->a->kind == target->kind && value->a->str == target->str;
+            if (compoundOp && sameVar)
+            {
+                // the right operand binds like the whole expression did, so keep parentheses where precedence needs them
+                int prec = binPrec(value->str);
+                std::string rhs = emitExprPrec(value->b, rightAssoc(value->str) ? prec : prec + 1);
+                return ind + emitExpr(target) + " " + value->str + "= " + rhs + "\n";
+            }
+        }
         out = ind;
         for (size_t i = 0; i < s->targets.size(); ++i)
             out += (i ? ", " : "") + emitExpr(s->targets[i]);

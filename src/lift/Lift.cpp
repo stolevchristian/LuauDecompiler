@@ -1219,11 +1219,18 @@ struct Lifter
         }
     }
 
+    // While a condition chain is being explored, materializations of values defined before the chain
+    // are counted here: they are emitted before the if and do not make a block a statement block.
+    int chainStart = -1;
+    int oldFlushes = 0;
+
     // Turn a pending value into a statement. Returns the expression to use for later reads.
     ExprP materialize(int reg)
     {
         Pending P = *pending[reg];
         pending[reg].reset();
+        if (chainStart >= 0 && P.defIdx < chainStart)
+            oldFlushes++;
         flushBefore(P.defIdx);
 
         if (!P.method.empty())
@@ -3081,6 +3088,9 @@ struct Lifter
             std::vector<StmtP> scratch;
             std::vector<StmtP>* saved = out;
             out = &scratch;
+            int savedChainStart = chainStart, savedOldFlushes = oldFlushes;
+            chainStart = start;
+            oldFlushes = 0;
             int cursor = start;
             while (cursor < limit && (cursor == start || !isLoopHeader(cursor)))
             {
@@ -3090,25 +3100,30 @@ struct Lifter
                 if (k >= limit || !isCondJump(an.insns[k].op))
                     break;
 
+                // statements that merely declare values defined before the chain are fine: they end
+                // up before the if. Anything else means this block is a body, not a condition.
                 size_t before = scratch.size();
+                int flushesBefore = oldFlushes;
                 bool ok = true;
                 try
                 {
                     for (int j = cursor; j < k; ++j)
                         liftSimple(j);
-                    if (scratch.size() == before)
+                    if (scratch.size() - before == size_t(oldFlushes - flushesBefore))
                         jumpCondition(k);
                 }
                 catch (const LiftError&)
                 {
                     ok = false;
                 }
-                if (!ok || scratch.size() != before)
+                if (!ok || scratch.size() - before != size_t(oldFlushes - flushesBefore))
                     break;
 
                 result.blocks.push_back(ChainBlock{cursor, k});
                 cursor = k + 1;
             }
+            chainStart = savedChainStart;
+            oldFlushes = savedOldFlushes;
             out = saved;
         }
         restore(snap);

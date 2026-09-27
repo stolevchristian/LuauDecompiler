@@ -44,6 +44,11 @@ struct Insn
     bool attachedCapture = false;
 };
 
+// Roblox ships bytecode whose opcode byte is multiplied by 227; decoding multiplies it back by
+// the modular inverse (203). 1 leaves standard bytecode untouched.
+void setOpcodeMultiplier(int multiplier);
+int getOpcodeMultiplier();
+
 // Decode all instructions of a proto. Multi-word instructions produce one Insn.
 std::vector<Insn> decodeProto(const Proto& proto);
 

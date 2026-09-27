@@ -171,6 +171,16 @@ the decompiler renders with a flag: `escaped = true; break` inside the loop and
 compiler captured by value are never assigned again, so a register reused after such a
 capture starts a new variable instead of clobbering the captured one.
 
+## Roblox bytecode
+
+Roblox uses the same container format as open-source Luau but multiplies every opcode
+byte by 227 before it reaches the client. `luaudec` detects that (the instructions do
+not decode as standard bytecode) and multiplies the opcodes back automatically; pass
+`--roblox` to force it or `--standard` to disable the detection. Dumps that are still
+zstd-compressed (`RSB1` header) must be decompressed first; luaudec reads the raw
+container. Anything after the main proto index, such as a trailing hash appended by a
+dumper, is ignored.
+
 ## Testing
 
 ```bash

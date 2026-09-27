@@ -279,6 +279,18 @@ const char* opcodeName(LuauOpcode op)
     }
 }
 
+static int gOpcodeMultiplier = 1;
+
+void setOpcodeMultiplier(int multiplier)
+{
+    gOpcodeMultiplier = multiplier;
+}
+
+int getOpcodeMultiplier()
+{
+    return gOpcodeMultiplier;
+}
+
 std::vector<Insn> decodeProto(const Proto& proto)
 {
     std::vector<Insn> insns;
@@ -288,8 +300,12 @@ std::vector<Insn> decodeProto(const Proto& proto)
     {
         Insn insn;
         insn.pc = uint32_t(i);
-        insn.word = code[i];
-        insn.op = LuauOpcode(LUAU_INSN_OP(insn.word));
+        // normalize the opcode byte so every later consumer sees standard encoding
+        uint32_t op = (code[i] & 0xff) * uint32_t(gOpcodeMultiplier) & 0xff;
+        insn.word = (code[i] & 0xffffff00u) | op;
+        if (op >= LOP__COUNT)
+            throw BytecodeError("unknown opcode " + std::to_string(op) + " at pc " + std::to_string(i));
+        insn.op = LuauOpcode(op);
         insn.length = Luau::getOpLength(insn.op);
         insn.a = LUAU_INSN_A(insn.word);
         insn.b = LUAU_INSN_B(insn.word);

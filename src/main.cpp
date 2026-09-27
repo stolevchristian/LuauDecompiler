@@ -6,6 +6,7 @@
 
 #include "Luau/BytecodeUtils.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -30,6 +31,24 @@ static void usage(const char* argv0)
     fprintf(stderr, "\n");
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -v            annotate decompiled output with diagnostics\n");
+    fprintf(stderr, "  --no-header   omit the comment banner at the top of decompiled output\n");
+    fprintf(stderr, "  --roblox      decode Roblox opcode encoding (opcode byte * 227); detected automatically otherwise\n");
+    fprintf(stderr, "  --standard    never apply the Roblox opcode decoding\n");
+}
+
+// Do all instructions decode with the current opcode multiplier?
+static bool instructionsDecode(const Module& m)
+{
+    try
+    {
+        for (const Proto& p : m.protos)
+            decodeProto(p);
+        return true;
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
 }
 
 // ----- JSON export (consumed by the web UI) -----
@@ -231,11 +250,24 @@ int main(int argc, char** argv)
 
     LiftOptions options;
     std::string path;
+    bool header = true;
+    enum
+    {
+        AutoEncoding,
+        RobloxEncoding,
+        StandardEncoding,
+    } encoding = AutoEncoding;
 
     for (int i = 1; i < argc; ++i)
     {
         const char* arg = argv[i];
-        if (strcmp(arg, "--disasm") == 0)
+        if (strcmp(arg, "--no-header") == 0)
+            header = false;
+        else if (strcmp(arg, "--roblox") == 0)
+            encoding = RobloxEncoding;
+        else if (strcmp(arg, "--standard") == 0)
+            encoding = StandardEncoding;
+        else if (strcmp(arg, "--disasm") == 0)
             mode = Disasm;
         else if (strcmp(arg, "--cfg") == 0)
             mode = Cfg;
@@ -282,6 +314,19 @@ int main(int argc, char** argv)
     {
         Module m = loadBytecodeFile(path);
 
+        // Roblox multiplies every opcode byte by 227; 203 is the inverse modulo 256
+        const int kRobloxMultiplier = 203;
+        if (encoding == RobloxEncoding)
+            setOpcodeMultiplier(kRobloxMultiplier);
+        else if (encoding == AutoEncoding && !instructionsDecode(m))
+        {
+            setOpcodeMultiplier(kRobloxMultiplier);
+            if (instructionsDecode(m))
+                fprintf(stderr, "note: instructions use the Roblox opcode encoding, decoding with --roblox\n");
+            else
+                setOpcodeMultiplier(1);
+        }
+
         switch (mode)
         {
         case Disasm:
@@ -313,8 +358,19 @@ int main(int argc, char** argv)
             break;
 
         case Decompile:
-            fputs(decompile(m, options).c_str(), stdout);
+        {
+            auto start = std::chrono::steady_clock::now();
+            std::string source = decompile(m, options);
+            double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            if (header)
+            {
+                printf("-- // Decompiled using Christian Stolev's decompiler\n");
+                printf("-- // https://github.com/stolevchristian/LuauDecompiler\n");
+                printf("-- // Decompilation took: %.2f ms\n\n", ms);
+            }
+            fputs(source.c_str(), stdout);
             break;
+        }
         }
     }
     catch (const std::exception& e)
